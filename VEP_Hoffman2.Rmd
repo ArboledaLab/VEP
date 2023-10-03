@@ -1,0 +1,224 @@
+---
+title: "Using VEP with Apptainer on Hoffman2"
+author: "Samantha Niles-Jensen"
+date: "2023-09-29"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Variant Effect Predictor (VEP) is a powerful variant annotation tool from the Ensembl database. You can use it to predict the consequence of coding variation (stop gained, missense, etc) or to add annotations from dozens of other sources (1000G allele frequency, SpliceAI predictions, ClinVar phenotypes, etc). You can provide VEP with [VCF or text imput files](http://useast.ensembl.org/info/docs/tools/vep/vep_formats.html#default) to get annotations. You can also choose the output file type. I generally choose tab-delimited output since that works the best for processing with R, but you can [read more](http://useast.ensembl.org/info/docs/tools/vep/vep_formats.html#defaultout) to learn how to annotate VCFs or output differently formatted files.
+
+[VEP online](https://useast.ensembl.org/Tools/VEP) has file size limits that much of our data doesn't fit under, so I was trying to get the command line version to work on Hoffman2. Installing the dependencies was difficult so I decided to use [the Docker version](http://useast.ensembl.org/info/docs/tools/vep/script/vep_download.html#docker). Docker is a tool that allows for mounting of an independent computing environment on any computer. The environment, called a [container](https://en.wikipedia.org/wiki/Containerization_(computing)), has all the necessary code and dependencies for a given program to run regardless of which system it is run on.  Unfortunately, while I could download the VEP Docker object easily, the Docker command line tool used to interact with it still requires root access, which we don't have on Hoffman2. I found a way to do it with another container management tool, [Apptainer](https://apptainer.org/docs/user/main/introduction.html), which does work on Hoffman2 (see [IDRE documentation](https://www.hoffman2.idre.ucla.edu/Using-H2/Software/Software.html#containers)).
+
+## Installing
+
+I've put an example VCF on Hoffman in `/u/project/arboleda/DATA/software/vep` so you can try running things. The 36 variants in that VCF are in the gene CLEC7A.
+
+Before running anything with VEP on Hoffman2, you'll need to request an interactive node (or write a script to do this with a submitted job), because it takes a lot of time and memory. I ran the following on an interactive node:
+
+```{bash, eval=FALSE}
+qrsh -l h_rt=12:00:00,h_data=20G # going to run interactively, so need a node
+```
+
+This is how I installed the VEP Docker object on Hoffman2 using Apptainer:
+
+```{bash, eval=FALSE}
+mkdir /u/project/arboleda/DATA/software/vep
+cd /u/project/arboleda/DATA/software/vep
+module load apptainer
+apptainer pull vep.sif docker://ensemblorg/ensembl-vep
+```
+
+This installs the VEP Docker object on Hoffman2 in the created folder. The only reason you would need to do this again is if you want a newer version of VEP available. You can move `vep.sif` to another directory and it will still work in that folder.
+
+Note that I ran all of the following commands from inside the `/u/project/arboleda/DATA/software/vep` folder. If I had been running from another location I would need to use `apptainer exec /u/project/arboleda/DATA/software/vep/vep.sif` for all commands instead of `apptainer exec vep.sif` (I've done this in the script example).
+
+## Downloading cache files
+
+In order for VEP to work, it needs big reference files. So the first thing we need to do is download them. The VEP Docker object has an interactive Perl script, `INSTALL.pl`, in it to make this easy.
+
+```{bash,eval=FALSE}
+apptainer exec vep.sif INSTALL.pl -c /u/project/arboleda/DATA/software/vep # this runs VEP's cache install script so you can interactively choose which reference files to download
+```
+
+I have installed the VEP cache and FASTA files for Homo sapiens GRCh38 (takes up 21GB), but you can easily install more using this same command. Downloading does take a while because the files are large.
+
+There is also a way to run this script non-interactively (with the `--AUTO` option). This might be useful if you need to install a big file and want to submit it as a job on Hoffman2 instead. You can see all the options using the help for the script:
+
+```{bash, eval=FALSE}
+apptainer exec vep.sif INSTALL.pl --help
+```
+
+## Running VEP interactively in the Docker environment
+
+Once you've finished installing the Docker object and downloading cache files, you can simply step into the Docker object and work from there. Then you don't have to put the `apptainer` command at the beginning of each command.
+
+```{bash, eval=FALSE}
+apptainer shell vep.sif
+```
+
+I would recommend writing scripts so you have a record of the commands you used, but I've used the syntax for VEP that works after stepping into the container below for simplicity.
+
+### Running VEP on VCFs
+
+VEP is simplest to run if you have variant call format (VCF) already since you don't need to alter the files and it can annotate structural variants properly.
+
+```{bash, eval=FALSE}
+vep --dir /u/project/arboleda/DATA/software/vep --cache --offline --everything --verbose --tab -i example_vcf.vcf -o example_basic_hg38_annotations.txt 
+```
+
+See the section [VEP options] for information about what each of these options mean.
+
+### Running VEP with dbSNP variant IDs
+
+Generally running VEP with the variant IDs only is a lot less memory intensive and so you can usually do this with the online version. However, it's still pretty convenient to use the Docker image version. You first need to make a list of all the variant names:
+
+```{bash, eval=FALSE}
+module load bcftools
+bcftools view -H example_vcf.vcf | grep rs | awk '{print $3}' > example_rsids.txt # most dbSNP IDs start with "rs"
+```
+
+Then you can use VEP to annotate by variant ID: 
+
+```{bash, eval=FALSE}
+vep --dir /u/project/arboleda/DATA/software/vep --cache --everything --verbose --tab --format id -i example_rsids.txt -o example_rsid_annotations.txt
+```
+
+For some reason you cannot run this command in offline mode.
+
+It is sometimes a good idea to run VEP by position (with a VCF input) and by ID (with text input) and compare results, as your VCF might have slightly different positions/alleles for some of the known variants that you could capture information about. In this case, you'll note that since I annotated the VCF with reference files for hg38 but the positions in the VCF are from hg19, I actually did not get proper annotations when I ran by position. Running by ID as well helped me catch that mistake. 
+
+### Using an online cache file
+
+If I wanted to annotate this VCF as is, I would either need to download the hg19 reference files with `INSTALL.pl` or run the command in online mode (`--database`) with the proper reference assembly name:
+
+```{bash, eval=FALSE}
+vep --dir /u/project/arboleda/DATA/software/vep --database -a GRCh37 --everything --verbose --tab -i example_vcf.vcf -o example_basic_hg19_annotations.txt
+```
+
+## Running VEP commands outside of the Docker environment
+
+You can also run any command without stepping into the Docker environment by including `apptainer exec vep.sif` at the start of the command.
+
+```{bash, eval=FALSE}
+apptainer exec vep.sif vep --dir /u/project/arboleda/DATA/software/vep --help
+```
+
+### Submitting a VEP annotation job on Hoffman2
+
+I wrote a job submission script that can be used to annotate any hg38 VCF file with useful annotations (`/u/project/arboleda/DATA/software/vep/run_vep_annotation.sh`):
+
+```{bash, eval=FALSE}
+#!/bin/bash
+#$ -cwd
+#$ -N vep_annotation
+#$ -o vep_annotation.$JOB_ID
+#$ -j y
+#$ -l h_rt=11:59:59,h_data=20G
+
+# note: you may need to increase the above runtime or memory if you have a large file to annotate
+
+# Submit this job from your working directory: qsub /u/project/arboleda/DATA/software/vep/run_vep_annotation.sh [input_vcf] [output_file]
+
+. /u/local/Modules/default/init/modules.sh
+module load apptainer
+
+input_vcf=$1
+output_file=$2
+
+vep_location=/u/project/arboleda/DATA/software/vep
+
+echo -e "Annotating variants from $input_vcf to ${output_file}.\n"
+
+apptainer exec ${vep_location}/vep.sif vep --dir $vep_location --cache --offline --everything --plugin ${vep_location}/plugin_references/homo_sapiens_ancestor_GRCh38.fa.gz --plugin SingleLetterAA --plugin NMD --plugin SpliceRegion --plugin TSSDistance --allele_number --show_ref_allele --uploaded_allele --check_existing --exclude_null_alleles --flag_pick_allele --verbose --tab --input_file $input_vcf --output_file $output_file
+
+echo -e "\nDone."
+```
+
+Feel free to copy this and add or remove annotations. It should work for anyone who belongs to the Hoffman2 `arboleda` group. If you don't have access to where I've installed the VEP Docker image then you may need to repeat the installation steps above.
+
+To run the example VCF with this script from the same directory I would do:
+
+```{bash, eval=FALSE}
+qsub run_vep_annotation.sh example_vcf.vcf example_qsub_output.txt
+```
+
+Reminder, though, that the annotations from this run are incorrect because the example VCF has hg19 as its reference, not hg38.
+
+## VEP options
+
+There are [way too many options](http://useast.ensembl.org/info/docs/tools/vep/script/vep_options.html) for me to go over them all here, so I'll just go over the main ones I used in this tutorial.
+
+### Input and output control
+
+Flag | Description                                         | Default | Example 
+-----|-----------------------------------------------------|---------|---------
+`--help` | Display basic VEP help. | | 
+`--dir` | Directory VEP will look for cache in. | `$HOME/.vep` | `/u/project/arboleda/DATA/software/vep`  
+`--cache` | Run VEP using saved database cache. | | 
+`--offline`| Don't connect to VEP servers. | | 
+`--database`| Connect to VEP servers. | | 
+`--assembly`/`-a` | Choose which reference cache to use. | File in cache. | `GRCh37` 
+`--verbose`/`-v` | Write out more detail while running. | | 
+`--tab`| Write output in tab-delimited format. | Space-delimited | 
+`--input_file`/`-i` | File to annotate variants from. Can be gzipped. | `STDIN` | `example_vcf.vcf` 
+`--format`| Format of input file. | Autodetected | `id` 
+`--output_file`/`-o` | Output file name. Will not overwrite existing file. | `variant_effect_output.txt` | `example_rsid_annotations.txt` 
+
+### Annotation options
+
+Flag | Description                                         | Output fields
+-----|-----------------------------------------------------|---------------
+`--plugin` | Use a specified plug-in for annotation. Can be included multiple times to use multiple plugins. | Depends on plug-in. The CADD plug-in produces the fields CADD_RAW and CADD_PHRED, for example.
+`--allele_number` | Identify multiallelic allele number from VCF order. | ALLELE_NUM
+`--show_ref_allele` | Add reference allele to output. | REF_ALLELE
+`--uploaded_allele` | Include full VCF allele string. | UPLOADED_ALLELE
+`--check_existing` | Check if variant matches known database variants. | Existing_variation, CLIN_SIG, SOMATIC, PHENO 
+`--flag_pick_allele` | Mark the [most severe consequence](http://useast.ensembl.org/info/docs/tools/vep/script/vep_other.html#pick) per allele for a variant. | PICK
+`--everything`/ `-e` | Turn on common flags, including all the following options. | See individual commands below. 
+`--sift` | Output SIFT prediction of amino acid substitution pathogenicity: *p*rediction, *s*core, or *b*oth. Included in `--everything`. | SIFT
+`--polyphen` | Output PolyPhen prediction of amino acid substitution pathogenicity: *p*rediction, *s*core, or *b*oth. Included in `--everything`. | PolyPhen
+`--ccds` | Add CCDS transcript identifier to coding variants. Included in `--everything`. | CCDS
+`--hgvs` | Add HGVS style name with ensembl transcript and protein sequence names to coding variants. Requires downloaded reference fasta. Included in `--everything`. | HGVSc, HGVSp, HGVS_OFFSET
+`--symbol` | Add gene common name to coding variants. Adds HGNC gene name if using the merged reference cache. Included in `--everything`. | SYMBOL, SYMBOL_SOURCE, HGNC_ID
+`--numbers` | Output exon or intron numbering for coding variants. Included in `--everything`. | EXON, INTRON
+`--domains` | Add names of overlapped protein domains. Included in `--everything`. | DOMAINS
+`--regulatory` | Annotate variant overlap with regulatory regions. Included in `--everything`. | MOTIF_NAME, MOTIF_POS, HIGH_INF_POS, MOTIF_SCORE_CHANGE
+`--canonical` | Mark if transcript is canonical transcript for gene. Included in `--everything`. | CANONICAL
+`--protein` | Add Ensembl protein ID to coding variants. Included in `--everything`. | ENSP
+`--biotype` | Annotate type of transcript or regulatory feature. Included in `--everything`. | BIOTYPE
+`--af` | Add global allele frequency from 1000G Phase 3. Included in `--everything`. | AF
+`--af_1kg` | Add continental allele frequencies from 1000G Phase 3. Included in `--everything`. | AFR_AF, AMR_AF, EAS_AF, EUR_AF, SAS_AF
+`--af_esp` | Add allele frequencies from NHLBI-ESP populations. _Deprecated_. Included in `--everything`. | AA_AF, EA_AF
+`--af_gnomade` | Add allele frequencies from gnomAD exome populations. Included in `--everything`. | gnomADe_AF, gnomADe_AFR_AF, gnomADe_AMR_AF, etc.
+`--af_gnomadg` | Add allele frequencies from gnomAD genome populations. Included in `--everything`. | gnomADg_AF, gnomADg_AFR_AF, gnomADg_AMI_AF, etc.
+`--max_af` | Annotate maximum allele frequency from 1000G, ESP, or gnomAD populations. Included in `--everything`. | MAX_AF, MAX_AF_POPS
+`--pubmed` | Report PubMed IDs for publications mentioning variant. Included in `--everything`. | PUBMED
+`--uniprot` | Add UniProt accession IDs from SWISSPROT, TREMBL, and UniParc databases for proteins to coding variants. Included in `--everything`. | SWISSPROT, TREMBL, UNIPARC, UNIPROT_ISOFORM
+`--mane` | Annotate if transcript is the main MANE database transcript for gene. Included in `--everything`. | MANE_SELECT, MANE_PLUS_CLINICAL
+`--tsl` | Add transcript support level for transcript to coding variants. Included in `--everything`. | TSL
+`--appris` | Add APPRIS isoform annotation of transcript to coding variants. Included in `--everything`. | APPRIS
+`--variant_class` | Output Sequence Ontology variant class. Included in `--everything`. | VARIANT_CLASS
+`--gene_phenotype` | Indicate if overlapped gene has an associated phenotype in ClinVar, COSMIC, dbVar, GWAS, etc. Included in `--everything`. | GENE_PHENO
+`--mirna` | Report where variant is in miRNA secondary structure. Included in `--everything`. | miRNA
+
+### Note about plug-ins
+
+VEP has a number of tools that allow annotations from non-Ensembl databases and software to be added to your output. These tools are called "plug-ins". I was really excited about using all the plug-ins that this version of VEP has installed. There is even one that adds the new Google [AplhaMissense](https://github.com/Ensembl/VEP_plugins/blob/release/110/AlphaMissense.pm) scores. It turns out for most of the plug-ins you need to download a huge database and we don't have room for that on Hoffman2. I did end up creating the necessary reference file for the AncestralAllele plug-in since it was relatively small (833MB). CADD and SpliceAI are the other plug-ins I frequently use and their reference files were more than 100GB each.
+
+The plug-ins you can use without downloading anything more than we have already are [Conservation](https://github.com/Ensembl/VEP_plugins/blob/release/110/Conservation.pm), [Downstream](https://github.com/Ensembl/VEP_plugins/blob/release/110/Downstream.pm), [Draw](https://github.com/Ensembl/VEP_plugins/blob/release/110/Draw.pm), [GO](https://github.com/Ensembl/VEP_plugins/blob/release/110/GO.pm), [HGVSIntronOffset](https://github.com/Ensembl/VEP_plugins/blob/release/110/HGVSIntronOffset.pm), [LD](https://github.com/Ensembl/VEP_plugins/blob/release/110/LD.pm), [NearestExonJB](https://github.com/Ensembl/VEP_plugins/blob/release/110/NearestExonJB.pm), [NearestGene](https://github.com/Ensembl/VEP_plugins/blob/release/110/NearestGene.pm), [NMD](https://github.com/Ensembl/VEP_plugins/blob/release/110/NMD.pm), [Phenotypes](https://github.com/Ensembl/VEP_plugins/blob/release/110/Phenotypes.pm), [ProteinSeqs](https://github.com/Ensembl/VEP_plugins/blob/release/110/ProteinSeqs.pm), [SameCodon](https://github.com/Ensembl/VEP_plugins/blob/release/110/SameCodon.pm), [SingleLetterAA](https://github.com/Ensembl/VEP_plugins/blob/release/110/SingleLetterAA.pm), [SpliceRegion](https://github.com/Ensembl/VEP_plugins/blob/release/110/SpliceRegion.pm), and [TSSDistance](https://github.com/Ensembl/VEP_plugins/blob/release/110/TSSDistance.pm). Please note that some of these require online mode, most produce a large amount of output, and many require additional parameters to be set.
+
+Here's how you would run VEP interactively with some of these plug-ins:
+
+```{bash, eval=FALSE}
+vep --dir_cache /u/project/arboleda/DATA/software/vep --cache --offline --everything --plugin AncestralAllele,/u/project/arboleda/DATA/software/vep/plugin_references/homo_sapiens_ancestor_GRCh38.fa.gz --plugin SingleLetterAA --plugin NMD --plugin SpliceRegion --plugin TSSDistance --verbose --tab -i example_vcf.vcf -o example_plugin_annotations.txt 
+```
+
+My recommendation is that if you want to use other plug-ins you should filter your variants to as small a number as possible and use the online version for those variants instead. It may also be possible to use the `--database` option instead of running VEP offline and use the plug-ins still, but I haven't tested this yet.
